@@ -1,0 +1,24 @@
+:root {
+  font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #213547;
+  background: #f4f7fa;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+a { color: #087f5b; text-underline-offset: 4px; }
+button { font: inherit; cursor: pointer; border: 0; border-radius: 8px; padding: 12px 20px; color: white; background: #087f5b; }
+button:hover { background: #066649; }
+:focus-visible { outline: 3px solid #2563eb; outline-offset: 4px; }
+.app-shell { max-width: 1040px; margin: 0 auto; padding: 0 24px 48px; }
+.app-header { display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; align-items: center; padding: 24px 0; border-bottom: 1px solid #dce4eb; }
+.app-header span { font-size: 14px; color: #526271; }
+.brand { font-weight: 700; font-size: 22px; text-decoration: none; }
+.hero { padding: 64px 0 32px; }
+.eyebrow { color: #087f5b; font-weight: 600; }
+h1 { font-size: clamp(28px, 5vw, 44px); line-height: 1.2; }
+h2 { font-size: 20px; margin-top: 0; }
+p { line-height: 1.7; }
+.card { background: white; border: 1px solid #dce4eb; border-radius: 16px; padding: 28px; }
