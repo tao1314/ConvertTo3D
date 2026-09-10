@@ -11,3 +11,8 @@ dist/
 !.vscode/extensions.json
 *.log
 .npm-cache/
+.venv/
+__pycache__/
+runtime/
+tools/libredwg/
+tools/*.zip
