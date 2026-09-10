@@ -189,7 +189,7 @@ def parse_dxf(source, name, version=None):
                         'nonPlanarCount': spatial, 'bounds': bounds, 'profiles': profiles})
     warnings = ['闭合区域只是候选轮廓，可能包含图框或不同视图；生成前需确认区域、单位及建模参数。',
                 '圆保持精确圆形；圆弧、样条及其他曲线目前按 0.01 图纸单位离散，生成结果需复核。',
-                '自动识别仅覆盖部分同轴台阶结构；其他视图关系需在通用特征组合中指定，螺纹与边处理需另外确认。']
+                '自动识别覆盖部分同轴台阶及对称轴向剖面与端面组合；其他视图关系需在通用特征组合中指定，螺纹简化需确认。']
     if not any(a['type'] == 'DIMENSION' for layout in layouts for a in layout['annotations']):
         warnings.insert(0, '图纸没有可读取的尺寸标注。不能据此自动确定原零件的厚度、深度或结构；轴测投影不能直接当作真实截面。')
     if audit.has_fixes:

@@ -172,6 +172,19 @@ h3 {
   font-size:13px;
   overflow-wrap:anywhere;
 }
+.upload-box.drag-active {
+  border:2px dashed #087e83;
+  padding:21px 9px;
+  background:#e5f5f3;
+  box-shadow:0 0 0 3px #087e831a;
+}
+.upload-box:focus-within {
+  outline:2px solid #087e83;
+  outline-offset:3px;
+}
+.upload-box.upload-disabled, .upload-box.upload-disabled input {
+  cursor:wait;
+}
 .upload-box>span:last-of-type {
   font-size:10px;
   color:#839598;

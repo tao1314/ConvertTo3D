@@ -1,8 +1,41 @@
 <script setup>
+// Coordinate drawing import, recognized whole-part plans and model generation.
 import { computed, onMounted, ref, watch } from 'vue'
 import ModelPreview from '@/components/ModelPreview.vue'
 import FeatureBuilder from '@/components/FeatureBuilder.vue'
 const features = ref([])
+const dragDepth = ref(0)
+const fileFeedback = ref('')
+function selectFiles(files) {
+  if (busy.value || !files?.length) return
+  if (files.length !== 1) {
+    fileFeedback.value = '一次请选择一个图纸文件。'
+    return
+  }
+  const selected = files[0]
+  if (!/\.(ipt|dwg|dxf)$/i.test(selected.name)) {
+    fileFeedback.value = '文件格式不支持，请选择 Inventor IPT 零件或 DWG / DXF 图纸。'
+    return
+  }
+  if (!selected.size || selected.size > 100 * 1024 * 1024) {
+    fileFeedback.value = selected.size ? '文件超过 100 MB，请选择较小的图纸。' : '文件为空，请重新选择。'
+    return
+  }
+  file.value = selected
+  error.value = ''
+  fileFeedback.value = `已选择 ${selected.name}，点击“解析图纸”继续。`
+}
+function dragOver(event) {
+  if (event.dataTransfer) event.dataTransfer.dropEffect = busy.value ? 'none' : 'copy'
+}
+function dropFile(event) {
+  dragDepth.value = 0
+  selectFiles(event.dataTransfer?.files)
+}
+function chooseFile(event) {
+  selectFiles(event.target.files)
+  event.target.value = ''
+}
 const api = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '')
 const workflow = ref('profile'), partId = ref(''), threadMode = ref('nominal-through')
 const drawing = ref(null),
@@ -29,6 +62,7 @@ const profile = computed(() =>
 )
 const parts = computed(() => (drawing.value?.partCandidates || []).filter(p => p.layout === layoutName.value))
 const part = computed(() => parts.value.find(p => p.id === partId.value) || parts.value[0])
+const nativePart = computed(() => drawing.value?.sourceType === 'inventor-part')
 const frame = computed(() => {
   const b = layout.value?.bounds || [0, 0, 100, 100],
     m = Math.max(b[2] - b[0], b[3] - b[1], 1) * 0.06
@@ -75,6 +109,13 @@ async function upload() {
     const body = new FormData()
     body.append('file', file.value)
     drawing.value = await request('/drawings', { method: 'POST', body })
+    if (drawing.value.sourceType === 'inventor-part') {
+      workflow.value = 'native'
+      result.value = drawing.value.result
+      confirmed.value = true
+      activeTab.value = 'model'
+      return
+    }
     layoutName.value =
       drawing.value.layouts.find((l) => l.entities.length)?.name || ''
     mmPerUnit.value =
@@ -168,21 +209,21 @@ onMounted(refreshHealth)
       <p class="eyebrow">ENGINEERING DRAWING → SOLID MODEL</p>
       <h1>从工程图，到三维实体</h1>
       <p class="subtitle">
-        导入 Inventor 导出的二维 DWG / DXF，重建实体并输出 SolidWorks 可读取的 STEP。
+        直接导入 Inventor IPT 完整零件，或从二维 DWG / DXF 重建实体，并输出 STEP。
       </p>
     </div>
     <button
       class="service-pill"
       title="点击刷新服务状态"
       @click="refreshHealth"
-      :class="{ warning: !health?.dwgParser || !health?.cadKernel }"
+      :class="{ warning: !health?.cadKernel }"
     >
       <i />{{
         !health
           ? '连接服务中'
           : health.offline
             ? '本地服务未启动'
-            : health.dwgParser && health.cadKernel
+            : health.cadKernel
               ? '本地 CAD 服务就绪'
               : 'CAD 依赖未就绪'
       }}
@@ -191,15 +232,18 @@ onMounted(refreshHealth)
   <div v-if="health?.offline" class="notice">
     请先运行 <code>npm run server</code> 启动本地解析服务，再刷新页面。
   </div>
+  <div v-else-if="health && !health.inventorImporter" class="notice">
+    当前机器未检测到 Autodesk Inventor。导入 IPT 需要安装并激活 Inventor；DWG / DXF 功能仍可使用。
+  </div>
   <div class="steps">
-    <span :class="{ done: drawing }"><b>01</b> 导入图纸</span
-    ><span :class="{ done: profile }"><b>02</b> 确认轮廓</span
+    <span :class="{ done: drawing }"><b>01</b> 导入文件</span
+    ><span :class="{ done: nativePart || profile || part }"><b>02</b> 读取完整零件</span
     ><span :class="{ done: result }"><b>03</b> 生成实体</span>
   </div>
   <div v-if="error" class="error" role="alert">{{ error }}</div>
   <div
     v-if="
-      drawing &&
+      drawing && !nativePart &&
       !drawing.layouts.some((l) =>
         l.annotations.some((a) => a.type === 'DIMENSION'),
       )
@@ -211,24 +255,27 @@ onMounted(refreshHealth)
   <div class="workbench" :aria-busy="!!busy">
     <aside class="panel controls">
       <div class="panel-heading">
-        <h2>图纸与建模</h2>
-        <span class="small-label">DWG / DXF</span>
+        <h2>零件导入与建模</h2>
+        <span class="small-label">IPT / DWG / DXF</span>
       </div>
       <label class="upload-box"
+        :class="{ 'drag-active': dragDepth > 0 && !busy, 'upload-disabled': !!busy }"
+        @dragenter.prevent="dragDepth++"
+        @dragover.prevent="dragOver"
+        @dragleave.prevent="dragDepth = Math.max(0, dragDepth - 1)"
+        @drop.prevent.stop="dropFile"
         ><span class="upload-icon">↥</span
-        ><strong>{{ file?.name || '选择二维工程图' }}</strong
-        ><span>DWG、DXF · 最大 25 MB · 本地处理</span
+        ><strong>{{ dragDepth > 0 ? (busy ? '正在处理，请稍后添加文件' : '松开鼠标，选择此文件') : file?.name || '点击选择或拖入 Inventor 零件' }}</strong
+        ><span>IPT、DWG、DXF · 最大 100 MB · 本地处理</span
         ><input
           type="file"
-          accept=".dwg,.dxf"
+          accept=".ipt,.dwg,.dxf"
           :disabled="!!busy"
-          @change="
-            (e) => {
-              file = e.target.files[0] || null
-              error = ''
-            }
-          "
+          aria-label="选择 IPT 零件或 DWG / DXF 图纸"
+          aria-describedby="file-feedback"
+          @change="chooseFile"
       /></label>
+      <p id="file-feedback" class="hint" role="status" aria-live="polite">{{ fileFeedback }}</p>
       <button
         class="primary full"
         :disabled="
@@ -236,13 +283,14 @@ onMounted(refreshHealth)
           !!busy ||
           !health ||
           health.offline ||
-          (!health.dwgParser && file.name.toLowerCase().endsWith('.dwg'))
+          (!health.dwgParser && file.name.toLowerCase().endsWith('.dwg')) ||
+          (!health.inventorImporter && file.name.toLowerCase().endsWith('.ipt'))
         "
         @click="upload"
       >
-        {{ busy || '解析图纸' }}
+        {{ busy || (file?.name.toLowerCase().endsWith('.ipt') ? '导入完整零件' : '解析图纸') }}
       </button>
-      <template v-if="drawing">
+      <template v-if="drawing && !nativePart">
         <div class="file-meta">
           <span>{{ drawing.dwgVersion || drawing.dxfVersion }}</span
           ><span>{{ fmt(drawing.sizeBytes / 1024) }} KB</span>
@@ -255,17 +303,27 @@ onMounted(refreshHealth)
               </option>
             </select></label
           >
-          <label>重建模式<select v-model="workflow"><option v-if="parts.length" value="part">同轴台阶零件自动识别方案</option><option value="features">多视图特征组合（通用）</option><option value="profile">单个二维区域拉伸 / 旋转</option></select></label>
+          <label>重建模式<select v-model="workflow"><option v-if="parts.length" value="part">整体零件自动识别方案</option><option value="features">多视图特征组合（通用）</option><option value="profile">单个二维区域拉伸 / 旋转</option></select></label>
           <FeatureBuilder v-if="workflow === 'features'" v-model="features" :drawing="drawing" />
           <div v-if="workflow === 'part' && part" class="part-plan">
             <label v-if="parts.length > 1">零件方案<select v-model="partId"><option v-for="p in parts" :key="p.id" :value="p.id">{{ p.label }}</option></select></label>
-            <strong>正视图 + 右侧视图 → 1 个实体</strong>
+            <strong>{{ part.label }} → 1 个实体</strong>
             <p>总长 {{ fmt(part.totalLength * Number(mmPerUnit || 1)) }} mm</p>
             <p v-for="(s,i) in part.outerStages" :key="`outer${i}`">外形 {{ i+1 }}：Ø{{ fmt(2*s.radius*Number(mmPerUnit||1)) }} × {{ fmt((s.end-s.start)*Number(mmPerUnit||1)) }} mm</p>
             <p v-for="(s,i) in part.innerStages" :key="`inner${i}`">中心孔 {{ i+1 }}：Ø{{ fmt(2*s.radius*Number(mmPerUnit||1)) }}，深 {{ fmt((s.end-s.start)*Number(mmPerUnit||1)) }} mm</p>
-            <p>{{ part.holes.filter(h=>!h.thread).length }} 个安装通孔 · {{ part.holes.filter(h=>h.thread).length }} 个螺纹标注孔</p>
-            <label>螺纹标注孔处理<select v-model="threadMode"><option value="nominal-through">按公称直径通孔简化（无螺纹牙型）</option><option value="omit">暂不生成，保留为待确认项</option></select></label>
-            <p class="hint">本次不做 R3 圆角／倒角。</p>
+            <template v-if="part.kind === 'axial-section'">
+              <p>合并主体剖面，保留中心流道及外形槽，重建 {{ part.holes.length }} 个盲孔。</p>
+              <p v-for="(hole, i) in part.holes" :key="hole.sourceHandle">
+                盲孔 {{ i + 1 }}：Ø{{ fmt(hole.diameter * Number(mmPerUnit || 1)) }}，
+                含钻尖总深 {{ fmt(hole.depth * Number(mmPerUnit || 1)) }} mm
+              </p>
+              <p v-for="note in part.assumptions" :key="note" class="hint">{{ note }}</p>
+            </template>
+            <template v-else>
+              <p>{{ part.holes.filter(h=>!h.thread).length }} 个安装通孔 · {{ part.holes.filter(h=>h.thread).length }} 个螺纹标注孔</p>
+              <label>螺纹标注孔处理<select v-model="threadMode"><option value="nominal-through">按公称直径通孔简化（无螺纹牙型）</option><option value="omit">暂不生成，保留为待确认项</option></select></label>
+              <p class="hint">本次不做 R3 圆角／倒角。</p>
+            </template>
             <p v-for="note in part.dimensionNotes" :key="note" class="hint">{{ note }}</p>
           </div>
           <label v-if="workflow === 'profile'"
@@ -337,7 +395,7 @@ onMounted(refreshHealth)
           </template>
           <label class="check"
             ><input v-model="confirmed" type="checkbox" /><span
-              >{{ workflow === 'features' ? '已核对各截面、视图对应关系、单位及特征位置，组合为同一个零件。' : workflow === 'part' ? '已确认两视图属于同一零件、单位及孔简化方案，本次不做 R3。' : '已核对轮廓、单位及参数；本次生成基于所选区域。' }}</span
+              >{{ workflow === 'features' ? '已核对各截面、视图对应关系、单位及特征位置，组合为同一个零件。' : workflow === 'part' ? '已确认两视图属于同一零件、单位及上述建模和简化方案。' : '已核对轮廓、单位及参数；本次生成基于所选区域。' }}</span
             ></label
           >
         </fieldset>
@@ -349,6 +407,11 @@ onMounted(refreshHealth)
           {{ busy || (workflow === 'part' ? '生成完整零件 →' : '生成三维实体 →') }}
         </button>
       </template>
+      <div v-if="nativePart" class="part-plan">
+        <strong>Inventor 完整零件已导入</strong>
+        <p>IPT 内的实体已整体转换并通过 STEP 回读校验，无需选择二维截面。</p>
+        <p>{{ result?.stats.solids }} 个实体 · {{ fmt(result?.stats.volumeMm3) }} mm³</p>
+      </div>
       <p class="hint output-note">
         当前输出：STEP 实体<br />原生 SLDPRT 需在 SolidWorks 中另存；STEP
         不含原始参数化特征树。
@@ -422,7 +485,7 @@ onMounted(refreshHealth)
         <div v-else class="empty-state">
           <div class="drawing-symbol">⌑</div>
           <h3>让图纸成为建模起点</h3>
-          <p>导入 DWG 或 DXF，查看实际几何与可用轮廓</p>
+          <p>导入 IPT 完整零件，或导入 DWG / DXF 查看可用轮廓</p>
         </div>
         <span v-if="layout" class="canvas-caption"
           >{{ workflow === 'part' ? '两个框选视图共同约束一个零件' : '点击浅色区域选择轮廓' }} · {{ layout.entities.length }} 个几何图元</span
@@ -431,7 +494,7 @@ onMounted(refreshHealth)
       <ModelPreview v-else :url="url(result?.previewUrl)" />
       <div v-if="result" class="download-bar">
         <div>
-          <strong>{{ result.mode === 'multiview-single-part' ? '完整零件已生成（按所选简化方案）' : '实体已生成' }}</strong
+          <strong>{{ result.mode === 'inventor-native-part' ? 'Inventor 完整零件已导入' : result.mode === 'multiview-single-part' ? '完整零件已生成（按所选简化方案）' : '实体已生成' }}</strong
           ><span
             >STEP 回读通过 · {{ result.stats.solids }} 个实体 ·
             {{ fmt(result.stats.volumeMm3) }} mm³</span
@@ -448,7 +511,7 @@ onMounted(refreshHealth)
       </div>
     </section>
   </div>
-  <section v-if="drawing" class="inspection">
+  <section v-if="drawing && !nativePart" class="inspection">
     <div class="panel">
       <div class="panel-heading">
         <h2>解析概况</h2>

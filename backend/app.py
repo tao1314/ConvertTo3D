@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from backend.drawing import ROOT, converter_path, convert_dwg, parse_dxf
+from backend.inventor import convert_ipt, inventor_available
 
 app = FastAPI(title='ConvertTo3D local CAD service')
 DATA = ROOT / 'runtime' / 'jobs'
@@ -90,7 +91,7 @@ def health():
         kernel = True
     except ImportError:
         kernel = False
-    return {'dwgParser': converter_path() is not None, 'cadKernel': kernel,
+    return {'dwgParser': converter_path() is not None, 'inventorImporter': inventor_available(), 'cadKernel': kernel,
             'nativeSolidWorks': False, 'outputFormats': ['step'] if kernel else [], 'mode': 'local'}
 
 
@@ -100,10 +101,10 @@ def upload_drawing(file: UploadFile = File(...)):
     suffix = Path(name).suffix.lower()
     if suffix == '.idw':
         raise HTTPException(415, '这是 Inventor 原生 IDW 工程图；当前请先在 Inventor 中导出为二维 DWG 或 DXF 后上传。')
-    if suffix in ('.ipt', '.iam'):
-        raise HTTPException(415, '这是 Inventor 三维模型，属于三维格式转换；当前二维重建接口接收 DWG / DXF。')
-    if suffix not in ('.dwg', '.dxf'):
-        raise HTTPException(415, '请上传 DWG 或 DXF 文件。')
+    if suffix == '.iam':
+        raise HTTPException(415, 'IAM 是 Inventor 装配体；当前接收单个 IPT 零件。')
+    if suffix not in ('.ipt', '.dwg', '.dxf'):
+        raise HTTPException(415, '请上传 Inventor IPT 零件或 DWG / DXF 图纸。')
     directory = DATA / uuid4().hex
     directory.mkdir()
     source = directory / ('source' + suffix)
@@ -112,11 +113,31 @@ def upload_drawing(file: UploadFile = File(...)):
         with source.open('wb') as output:
             while chunk := file.file.read(1024*1024):
                 size += len(chunk)
-                if size > 25*1024*1024:
-                    raise HTTPException(413, '文件不能超过 25 MB。')
+                if size > 100*1024*1024:
+                    raise HTTPException(413, '文件不能超过 100 MB。')
                 output.write(chunk)
         if size == 0:
             raise ValueError('上传文件为空。')
+        if suffix == '.ipt':
+            from backend.modeling import import_step
+            generation_id = uuid4().hex
+            output = directory / generation_id
+            output.mkdir()
+            diagnostic = convert_ipt(source, output / 'inventor.step')
+            stats = import_step(output / 'inventor.step', output)
+            recipe = {'source': name, 'jobId': directory.name, 'mode': 'inventor-native-part',
+                      'verification': stats, 'output': 'one STEP B-rep solid; native IPT feature history is not included'}
+            (output / 'recipe.json').write_text(json.dumps(recipe, ensure_ascii=False, indent=2), encoding='utf-8')
+            metadata = {'id': directory.name, 'name': name, 'sizeBytes': size,
+                        'sourceType': 'inventor-part', 'layouts': [], 'partCandidates': [],
+                        'warnings': ['直接转换 IPT 中的完整零件实体，不执行二维截面识别。']}
+            (directory / 'drawing.json').write_text(json.dumps(metadata, ensure_ascii=False), encoding='utf-8')
+            (directory / 'converter.log').write_text(diagnostic, encoding='utf-8')
+            base = f'/api/drawings/{directory.name}/outputs/{generation_id}'
+            metadata['result'] = {'generationId': generation_id, 'stats': stats,
+                                  'mode': 'inventor-native-part', 'stepUrl': f'{base}/model.step',
+                                  'previewUrl': f'{base}/preview.stl', 'recipeUrl': f'{base}/recipe.json'}
+            return metadata
         version = None
         diagnostic = ''
         dxf = source

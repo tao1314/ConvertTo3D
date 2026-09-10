@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -13,6 +14,7 @@ import uvicorn
 import ezdxf
 import backend.app as service
 from backend.tests.fixtures import endcap_drawing
+from backend.tests.test_axial import axial_drawing
 
 
 class ApiTests(unittest.TestCase):
@@ -61,7 +63,8 @@ class ApiTests(unittest.TestCase):
         code, body = self.upload('test.idw', b'test')
         self.assertEqual(code, 415)
         self.assertIn('IDW', json.loads(body)['detail'])
-        self.assertEqual(self.upload('test.ipt', b'test')[0], 415)
+        with patch('backend.app.convert_ipt', side_effect=ValueError('IPT 文件头无效')):
+            self.assertEqual(self.upload('test.ipt', b'test')[0], 422)
         self.assertEqual(self.upload('test.dxf', b'')[0], 422)
         self.assertEqual(self.upload('test.dwg', b'not a dwg')[0], 422)
         self.assertEqual(self.call('/api/drawings/not-a-job/outputs/bad/model.step')[0], 404)
@@ -95,6 +98,46 @@ class ApiTests(unittest.TestCase):
         _, again = self.call(endpoint, json.dumps({**params, 'depthMm': 9}).encode())
         self.assertNotEqual(generated['generationId'], json.loads(again)['generationId'])
         self.assertEqual(self.call(generated['stepUrl'])[1], step)
+
+    # Native IPT files bypass all drawing profiles and return one ready model.
+    def test_ipt_upload_returns_complete_native_part(self):
+        def fake_convert(_source, target):
+            Path(target).write_bytes(b'translated-step')
+            return 'Inventor test translator'
+
+        def fake_import(_source, output):
+            (Path(output) / 'model.step').write_bytes(b'ISO-10303-21; test')
+            (Path(output) / 'preview.stl').write_bytes(b'solid test\nendsolid test')
+            return {'valid': True, 'solids': 1, 'volumeMm3': 125.5,
+                    'stepRoundTripVerified': True}
+
+        with patch('backend.app.convert_ipt', side_effect=fake_convert), \
+                patch('backend.modeling.import_step', side_effect=fake_import):
+            code, payload = self.upload('part.ipt', bytes.fromhex('D0CF11E0A1B11AE1') + b'part')
+        self.assertEqual(code, 200, payload)
+        part = json.loads(payload)
+        self.assertEqual(part['sourceType'], 'inventor-part')
+        self.assertEqual(part['layouts'], [])
+        self.assertEqual(part['result']['mode'], 'inventor-native-part')
+        self.assertEqual(part['result']['stats']['solids'], 1)
+        self.assertTrue(self.call(part['result']['stepUrl'])[1].startswith(b'ISO-10303-21;'))
+
+    # Exercise the same upload/generate/download route used by the whole-part UI.
+    def test_axial_section_endpoint_returns_one_complete_solid(self):
+        source = axial_drawing(Path(self.temp.name) / 'axial.dxf')
+        code, payload = self.upload('axial.dxf', source.read_bytes())
+        self.assertEqual(code, 200, payload)
+        drawing = json.loads(payload)
+        self.assertEqual(drawing['partCandidates'][0]['kind'], 'axial-section')
+        params = {'partId': drawing['partCandidates'][0]['id'], 'mmPerUnit': 1, 'confirmed': True}
+        code, payload = self.call(f"/api/drawings/{drawing['id']}/generate-part", json.dumps(params).encode())
+        self.assertEqual(code, 200, payload)
+        result = json.loads(payload)
+        self.assertEqual(result['stats']['solids'], 1)
+        self.assertEqual(result['stats']['featureCount'], 3)
+        self.assertTrue(result['stats']['stepRoundTripVerified'])
+        self.assertEqual(self.call(result['previewUrl'])[0], 200)
+        self.assertTrue(self.call(result['stepUrl'])[1].startswith(b'ISO-10303-21;'))
 
     def test_multiview_endpoint_requires_confirmation_and_returns_one_solid(self):
         source = endcap_drawing(Path(self.temp.name)/'endcap.dxf')

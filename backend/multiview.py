@@ -24,6 +24,7 @@ def merge_stages(stages):
     return result
 
 
+# Combine evidence-based recognizers without depending on drawing filenames.
 def recognize_parts(layouts):
     candidates = []
     for layout in layouts:
@@ -159,4 +160,7 @@ def recognize_parts(layouts):
                                'assumptions': ['右侧视图与正视图同尺度且轴线对齐；两视图共同描述一个零件。',
                                                'M 标注孔仅在用户选择后按图示公称直径通孔简化，不生成螺纹牙型或底孔。',
                                                'R3 未指定作用边，本次不施加圆角或倒角。']})
+    from backend.axial import recognize_axial_sections
+    for part in recognize_axial_sections(layouts):
+        candidates.append({**part, 'id': f'part{len(candidates)}'})
     return candidates

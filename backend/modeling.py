@@ -110,10 +110,22 @@ def export_solid(shape, directory):
     return {**stats, 'stepRoundTripVerified': True}
 
 
+# Import and normalize a translated native part through the same output validation path.
+def import_step(source, directory):
+    reader = STEPControl_Reader()
+    if reader.ReadFile(str(source)) != IFSelect_RetDone or not reader.TransferRoots():
+        raise ValueError('Inventor 导出的 STEP 无法读取。')
+    return export_solid(reader.OneShape(), directory)
+
+
+# Dispatch recognized whole-part plans through the shared single-solid validation.
 def build_multiview(part, params, directory):
     scale = params['mmPerUnit']
     if not math.isfinite(scale) or not 0 < scale <= 1000:
         raise ValueError('单位比例无效。')
+    if part['kind'] == 'axial-section':
+        from backend.axial import build_axial_section
+        return build_axial_section(part, params, directory)
 
     def cylinder(radius, start, end, x=0, y=0):
         return BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(x*scale, y*scale, start*scale), gp_Dir(0,0,1)),
