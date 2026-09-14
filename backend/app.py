@@ -4,12 +4,13 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from backend.drawing import ROOT, converter_path, convert_dwg, parse_dxf
-from backend.inventor import convert_ipt, inventor_available
+from backend.inventor import PARAMETRIC_UNAVAILABLE, convert_ipt, inventor_available
+from backend.pdf_routes import create_pdf_router
 
 app = FastAPI(title='ConvertTo3D local CAD service')
 DATA = ROOT / 'runtime' / 'jobs'
@@ -84,6 +85,9 @@ def job_dir(job_id):
     return directory
 
 
+app.include_router(create_pdf_router(job_dir))
+
+
 @app.get('/api/health')
 def health():
     try:
@@ -92,11 +96,13 @@ def health():
     except ImportError:
         kernel = False
     return {'dwgParser': converter_path() is not None, 'inventorImporter': inventor_available(), 'cadKernel': kernel,
-            'nativeSolidWorks': False, 'outputFormats': ['step'] if kernel else [], 'mode': 'local'}
+            'nativeSolidWorks': False, 'outputFormats': ['step'] if kernel else [], 'mode': 'local',
+            'iptParametric': {'available': False, 'reason': PARAMETRIC_UNAVAILABLE}}
 
 
 @app.post('/api/drawings')
-def upload_drawing(file: UploadFile = File(...)):
+# Honor the requested format without silently substituting geometry for feature history.
+def upload_drawing(file: UploadFile = File(...), outputFormat: Literal['step', 'sldprt'] = Form('step')):
     name = Path((file.filename or '').replace('\\', '/')).name
     suffix = Path(name).suffix.lower()
     if suffix == '.idw':
@@ -105,6 +111,11 @@ def upload_drawing(file: UploadFile = File(...)):
         raise HTTPException(415, 'IAM 是 Inventor 装配体；当前接收单个 IPT 零件。')
     if suffix not in ('.ipt', '.dwg', '.dxf'):
         raise HTTPException(415, '请上传 Inventor IPT 零件或 DWG / DXF 图纸。')
+    if outputFormat == 'sldprt':
+        file.file.close()
+        if suffix != '.ipt':
+            raise HTTPException(422, '原始参数化 SLDPRT 转换只适用于 IPT 零件。')
+        raise HTTPException(503, PARAMETRIC_UNAVAILABLE)
     directory = DATA / uuid4().hex
     directory.mkdir()
     source = directory / ('source' + suffix)
@@ -126,7 +137,8 @@ def upload_drawing(file: UploadFile = File(...)):
             diagnostic = convert_ipt(source, output / 'inventor.step')
             stats = import_step(output / 'inventor.step', output)
             recipe = {'source': name, 'jobId': directory.name, 'mode': 'inventor-native-part',
-                      'verification': stats, 'output': 'one STEP B-rep solid; native IPT feature history is not included'}
+                      'verification': stats, 'converter': 'InventorLoader + FreeCAD',
+                      'output': 'one STEP file retaining source solids; native IPT feature history is not included'}
             (output / 'recipe.json').write_text(json.dumps(recipe, ensure_ascii=False, indent=2), encoding='utf-8')
             metadata = {'id': directory.name, 'name': name, 'sizeBytes': size,
                         'sourceType': 'inventor-part', 'layouts': [], 'partCandidates': [],

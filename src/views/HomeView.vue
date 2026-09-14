@@ -3,6 +3,9 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import ModelPreview from '@/components/ModelPreview.vue'
 import FeatureBuilder from '@/components/FeatureBuilder.vue'
+import EngineeringDrawing from '@/components/EngineeringDrawing.vue'
+import IptOutputFormat from '@/components/IptOutputFormat.vue'
+const iptOutputFormat = ref('step')
 const features = ref([])
 const dragDepth = ref(0)
 const fileFeedback = ref('')
@@ -23,7 +26,9 @@ function selectFiles(files) {
   }
   file.value = selected
   error.value = ''
-  fileFeedback.value = `已选择 ${selected.name}，点击“解析图纸”继续。`
+  fileFeedback.value = selected.name.toLowerCase().endsWith('.ipt')
+    ? `已选择 ${selected.name}，点击“开始转换”读取该零件。`
+    : `已选择 ${selected.name}，点击“解析图纸”继续。`
 }
 function dragOver(event) {
   if (event.dataTransfer) event.dataTransfer.dropEffect = busy.value ? 'none' : 'copy'
@@ -101,13 +106,20 @@ async function request(endpoint, options) {
 }
 async function upload() {
   if (!file.value || busy.value) return
-  busy.value = '正在解析图纸…'
+  if (file.value.name.toLowerCase().endsWith('.ipt') && iptOutputFormat.value === 'sldprt') {
+    error.value = health.value?.iptParametric?.reason || '原始参数化 SLDPRT 转换尚未实现。'
+    return
+  }
+  busy.value = file.value.name.toLowerCase().endsWith('.ipt')
+    ? '正在读取完整零件…'
+    : '正在解析图纸…'
   error.value = ''
   result.value = null
   drawing.value = null
   try {
     const body = new FormData()
     body.append('file', file.value)
+    body.append('outputFormat', file.value.name.toLowerCase().endsWith('.ipt') ? iptOutputFormat.value : 'step')
     drawing.value = await request('/drawings', { method: 'POST', body })
     if (drawing.value.sourceType === 'inventor-part') {
       workflow.value = 'native'
@@ -190,6 +202,8 @@ watch(
     workflow, partId, threadMode,
   ],
   () => {
+    // Native IPT results are independent of the two-dimensional modeling controls.
+    if (nativePart.value) return
     confirmed.value = false
     result.value = null
   },
@@ -233,7 +247,7 @@ onMounted(refreshHealth)
     请先运行 <code>npm run server</code> 启动本地解析服务，再刷新页面。
   </div>
   <div v-else-if="health && !health.inventorImporter" class="notice">
-    当前机器未检测到 Autodesk Inventor。导入 IPT 需要安装并激活 Inventor；DWG / DXF 功能仍可使用。
+    IPT 转换环境尚未就绪，请先配置项目的开源转换组件。无需安装 Inventor；DWG / DXF 功能仍可使用。
   </div>
   <div class="steps">
     <span :class="{ done: drawing }"><b>01</b> 导入文件</span
@@ -276,6 +290,12 @@ onMounted(refreshHealth)
           @change="chooseFile"
       /></label>
       <p id="file-feedback" class="hint" role="status" aria-live="polite">{{ fileFeedback }}</p>
+      <IptOutputFormat
+        v-if="file?.name.toLowerCase().endsWith('.ipt')"
+        v-model="iptOutputFormat"
+        :disabled="!!busy"
+        :reason="health?.iptParametric?.reason"
+      />
       <button
         class="primary full"
         :disabled="
@@ -283,12 +303,12 @@ onMounted(refreshHealth)
           !!busy ||
           !health ||
           health.offline ||
-          (!health.dwgParser && file.name.toLowerCase().endsWith('.dwg')) ||
-          (!health.inventorImporter && file.name.toLowerCase().endsWith('.ipt'))
+          (file.name.toLowerCase().endsWith('.ipt') && iptOutputFormat === 'sldprt') ||
+          (!health.dwgParser && file.name.toLowerCase().endsWith('.dwg'))
         "
         @click="upload"
       >
-        {{ busy || (file?.name.toLowerCase().endsWith('.ipt') ? '导入完整零件' : '解析图纸') }}
+        {{ busy || (file?.name.toLowerCase().endsWith('.ipt') ? '开始转换' : '解析图纸') }}
       </button>
       <template v-if="drawing && !nativePart">
         <div class="file-meta">
@@ -413,8 +433,7 @@ onMounted(refreshHealth)
         <p>{{ result?.stats.solids }} 个实体 · {{ fmt(result?.stats.volumeMm3) }} mm³</p>
       </div>
       <p class="hint output-note">
-        当前输出：STEP 实体<br />原生 SLDPRT 需在 SolidWorks 中另存；STEP
-        不含原始参数化特征树。
+        STEP 输出仅保留实体几何；另存为 SLDPRT 也不会自动恢复原始草图、尺寸约束及特征历史。
       </p>
     </aside>
     <section class="panel viewer-panel">
@@ -494,7 +513,7 @@ onMounted(refreshHealth)
       <ModelPreview v-else :url="url(result?.previewUrl)" />
       <div v-if="result" class="download-bar">
         <div>
-          <strong>{{ result.mode === 'inventor-native-part' ? 'Inventor 完整零件已导入' : result.mode === 'multiview-single-part' ? '完整零件已生成（按所选简化方案）' : '实体已生成' }}</strong
+          <strong>{{ result.mode === 'inventor-native-part' ? 'IPT 已转换为完整 STEP 模型' : result.mode === 'multiview-single-part' ? '完整零件已生成（按所选简化方案）' : '实体已生成' }}</strong
           ><span
             >STEP 回读通过 · {{ result.stats.solids }} 个实体 ·
             {{ fmt(result.stats.volumeMm3) }} mm³</span
@@ -511,6 +530,7 @@ onMounted(refreshHealth)
       </div>
     </section>
   </div>
+  <EngineeringDrawing v-if="result?.stepUrl" :key="result.stepUrl" :step-url="url(result.stepUrl)" :name="drawing?.name" />
   <section v-if="drawing && !nativePart" class="inspection">
     <div class="panel">
       <div class="panel-heading">

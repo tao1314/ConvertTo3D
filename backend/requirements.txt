@@ -4,3 +4,5 @@ fastapi==0.141.1
 uvicorn==0.52.4
 python-multipart==0.0.32
 shapely==2.1.2
+reportlab==4.4.9
+pypdf==6.10.0

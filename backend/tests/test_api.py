@@ -1,5 +1,6 @@
 """Exercise the real HTTP boundary against an isolated temporary job directory."""
 import json
+import os
 from pathlib import Path
 import socket
 import tempfile
@@ -15,9 +16,55 @@ import ezdxf
 import backend.app as service
 from backend.tests.fixtures import endcap_drawing
 from backend.tests.test_axial import axial_drawing
+from backend.inventor import inventor_available
 
 
 class ApiTests(unittest.TestCase):
+    # Check generation, PDF retrieval and identifier validation against the real HTTP API.
+    def test_engineering_pdf_endpoint_and_download(self):
+        from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder
+        from backend.modeling import export_solid
+        directory = service.DATA / ('a' * 32)
+        output = directory / ('b' * 32)
+        output.mkdir(parents=True, exist_ok=True)
+        (directory / 'drawing.json').write_text('{}', encoding='utf-8')
+        export_solid(BRepPrimAPI_MakeCylinder(10, 30).Shape(), output)
+        endpoint = f'/api/drawings/{directory.name}/outputs/{output.name}/engineering-pdf'
+        code, payload = self.call(endpoint, json.dumps({'title': 'PDF test'}).encode())
+        self.assertEqual(code, 200, payload)
+        report = json.loads(payload)
+        code, pdf = self.call(report['pdfUrl'])
+        self.assertEqual(code, 200)
+        self.assertTrue(pdf.startswith(b'%PDF-'))
+        self.assertEqual(self.call(report['pdfUrl'] + '?download=true')[0], 200)
+        self.assertEqual(self.call(endpoint, b'{"sectionPercent":100}')[0], 422)
+        self.assertEqual(self.call(endpoint, b'{"scale":10}')[0], 422)
+        self.assertEqual(self.call(endpoint + '/not-a-revision')[0], 404)
+
+    # Exercise actual uploaded IPT samples through conversion and downloadable STEP output.
+    @unittest.skipUnless(os.getenv('IPT_SAMPLE_DIR') and inventor_available(), 'Optional real IPT samples/runtime unavailable')
+    def test_real_ipt_uploads_preserve_complete_geometry(self):
+        samples = [('下接头.ipt', 1, 21), ('中部连接头.ipt', 1, 54), ('下接头 -2.ipt', 2, 42)]
+        for filename, solids, faces in samples:
+            with self.subTest(filename=filename):
+                source = Path(os.environ['IPT_SAMPLE_DIR']) / filename
+                code, payload = self.upload(filename, source.read_bytes())
+                self.assertEqual(code, 200, payload.decode('utf-8'))
+                drawing = json.loads(payload)
+                result = drawing['result']
+                self.assertEqual(drawing['layouts'], [])
+                self.assertTrue(result['stats']['valid'])
+                self.assertTrue(result['stats']['stepRoundTripVerified'])
+                self.assertEqual(result['stats']['solids'], solids)
+                report = json.loads((service.DATA / drawing['id'] / 'converter.log').read_text(encoding='utf-8'))
+                self.assertEqual(report['sourceFaces'], faces)
+                self.assertEqual(report['outputFaces'], faces)
+                self.assertTrue(report['faceCountVerified'])
+                status, step = self.call(result['stepUrl'])
+                self.assertEqual(status, 200)
+                self.assertTrue(step.startswith(b'ISO-10303-21;'))
+                self.assertEqual(self.call(result['previewUrl'])[0], 200)
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
@@ -52,11 +99,29 @@ class ApiTests(unittest.TestCase):
         except HTTPError as error:
             return error.code, error.read()
 
-    def upload(self, filename, content):
+    # Send an explicit output choice when testing format routing; retain legacy uploads.
+    def upload(self, filename, content, output_format=None):
         boundary = 'test-cad-boundary'
+        fields = (f'--{boundary}\r\nContent-Disposition: form-data; name="outputFormat"\r\n\r\n'
+                  f'{output_format}\r\n').encode() if output_format is not None else b''
         body = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
                 'Content-Type: application/octet-stream\r\n\r\n').encode() + content + f'\r\n--{boundary}--\r\n'.encode()
-        return self.call('/api/drawings', body, f'multipart/form-data; boundary={boundary}')
+        return self.call('/api/drawings', fields + body, f'multipart/form-data; boundary={boundary}')
+
+    # Reject unsupported parametric output before conversion or creating a misleading job.
+    def test_ipt_output_selection_does_not_fall_back_to_step(self):
+        previous_jobs = set(service.DATA.iterdir())
+        with patch('backend.app.convert_ipt') as converter:
+            code, payload = self.upload('part.ipt', b'ipt', 'sldprt')
+            self.assertEqual(code, 503)
+            self.assertIn('尚未实现', json.loads(payload)['detail'])
+            self.assertEqual(self.upload('drawing.dxf', b'dxf', 'sldprt')[0], 422)
+            self.assertEqual(self.upload('part.ipt', b'ipt', 'unknown')[0], 422)
+            converter.assert_not_called()
+        self.assertEqual(set(service.DATA.iterdir()), previous_jobs)
+        code, payload = self.call('/api/health')
+        self.assertEqual(code, 200)
+        self.assertFalse(json.loads(payload)['iptParametric']['available'])
 
     def test_rejects_unsupported_empty_and_invalid_dwg(self):
         self.assertEqual(self.upload('test.txt', b'test')[0], 415)
@@ -113,7 +178,7 @@ class ApiTests(unittest.TestCase):
 
         with patch('backend.app.convert_ipt', side_effect=fake_convert), \
                 patch('backend.modeling.import_step', side_effect=fake_import):
-            code, payload = self.upload('part.ipt', bytes.fromhex('D0CF11E0A1B11AE1') + b'part')
+            code, payload = self.upload('part.ipt', bytes.fromhex('D0CF11E0A1B11AE1') + b'part', 'step')
         self.assertEqual(code, 200, payload)
         part = json.loads(payload)
         self.assertEqual(part['sourceType'], 'inventor-part')

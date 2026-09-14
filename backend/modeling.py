@@ -15,7 +15,7 @@ from OCP.IFSelect import IFSelect_RetDone
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.StlAPI import StlAPI_Writer
 from OCP.TopExp import TopExp_Explorer
-from OCP.TopAbs import TopAbs_SOLID
+from OCP.TopAbs import TopAbs_SOLID, TopAbs_FACE
 from shapely.geometry import Polygon
 
 
@@ -85,12 +85,17 @@ def profile_shape(profile, params):
     return shape
 
 
-def export_solid(shape, directory):
+# Validate and export a model; native IPT may preserve multiple source solids.
+def export_solid(shape, directory, allow_multiple=False):
     stats = solid_stats(shape)
-    if not stats['valid'] or stats['solids'] != 1 or stats['volumeMm3'] < 1e-9:
+    expected_count = stats['solids'] if allow_multiple else 1
+    if not stats['valid'] or stats['solids'] < 1 or stats['solids'] != expected_count or stats['volumeMm3'] < 1e-9:
         raise ValueError('建模结果未通过单实体有效性检查，请检查轮廓和参数。')
+    if allow_multiple and TopExp_Explorer(shape, TopAbs_FACE, TopAbs_SOLID).More():
+        raise ValueError('转换模型包含实体以外的独立曲面，无法确认完整性。')
     # Boolean operations can return a compound containing one solid. Export the solid itself.
-    shape = TopoDS.Solid_s(TopExp_Explorer(shape, TopAbs_SOLID).Current())
+    if stats['solids'] == 1:
+        shape = TopoDS.Solid_s(TopExp_Explorer(shape, TopAbs_SOLID).Current())
     directory = Path(directory)
     step_path = directory / 'model.step'
     writer = STEPControl_Writer()
@@ -101,7 +106,7 @@ def export_solid(shape, directory):
     if reader.ReadFile(str(step_path)) != IFSelect_RetDone or not reader.TransferRoots():
         raise ValueError('STEP 回读失败。')
     exported = solid_stats(reader.OneShape())
-    if not exported['valid'] or exported['solids'] != 1 or not math.isclose(exported['volumeMm3'], stats['volumeMm3'], rel_tol=1e-6, abs_tol=1e-6):
+    if not exported['valid'] or exported['solids'] != expected_count or not math.isclose(exported['volumeMm3'], stats['volumeMm3'], rel_tol=1e-6, abs_tol=1e-6):
         raise ValueError('STEP 回读实体或体积校验失败。')
     BRepMesh_IncrementalMesh(shape, 0.05, False, 0.3, True).Perform()
     stl = StlAPI_Writer()
@@ -114,8 +119,8 @@ def export_solid(shape, directory):
 def import_step(source, directory):
     reader = STEPControl_Reader()
     if reader.ReadFile(str(source)) != IFSelect_RetDone or not reader.TransferRoots():
-        raise ValueError('Inventor 导出的 STEP 无法读取。')
-    return export_solid(reader.OneShape(), directory)
+        raise ValueError('IPT 转换得到的 STEP 无法读取。')
+    return export_solid(reader.OneShape(), directory, allow_multiple=True)
 
 
 # Dispatch recognized whole-part plans through the shared single-solid validation.

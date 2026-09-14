@@ -16,3 +16,7 @@ __pycache__/
 runtime/
 tools/libredwg/
 tools/*.zip
+tools/*.7z
+tools/freecad/
+tools/InventorLoader-master/
+tools/ipt-python/

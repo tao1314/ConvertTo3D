@@ -1,10 +1,10 @@
 # ConvertTo3D
 
-本地 Inventor 零件转换与二维工程图重建工作台。Vue 3 前端 + Python FastAPI + Autodesk Inventor + LibreDWG + Open CASCADE。
+本地 Inventor 零件转换与二维工程图重建工作台。Vue 3 前端 + Python FastAPI + InventorLoader / FreeCAD 便携运行环境 + LibreDWG + Open CASCADE。
 
 ## 当前能力
 
-- 直接上传 Inventor IPT 零件，通过本机 Inventor 读取完整实体并转换为 STEP；IPT 不执行二维截面识别。
+- 直接上传 IPT，通过项目内的开源转换器读取原有实体并转换为一个 STEP 文件，无需安装或激活 Inventor；IPT 不执行二维截面识别。多实体 IPT 保留所有实体，不强制合并或丢弃。
 - 上传 DWG / DXF（最大 100 MB），读取实际几何、图层、布局、文字、尺寸和单位。
 - 展开普通块引用，识别闭合区域；标注不参与建模，非 XY 平面和中心/虚线几何不参与轮廓生成。
 - 二维轮廓预览、区域选择、单位确认；支持单个闭合区域拉伸或绕 X/Y 方向轴旋转。
@@ -16,10 +16,12 @@
 
 ## 安装与运行（Windows）
 
-需要 Python 3.13 64 位和支持 Vite 7 的 Node.js。直接导入 IPT 还需要本机安装并激活 Autodesk Inventor。首次安装：
+需要 Python 3.13 64 位和支持 Vite 7 的 Node.js。首次安装：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/setup.ps1
+# IPT 转换另行配置便携运行组件（约 484 MB 下载，解压后占用更多空间）：
+powershell -ExecutionPolicy Bypass -File scripts/setup-ipt.ps1
 # 如官方 PyPI 网络较慢，可选择镜像：
 powershell -ExecutionPolicy Bypass -File scripts/setup.ps1 -PackageIndex https://pypi.tuna.tsinghua.edu.cn/simple
 ```
@@ -40,7 +42,7 @@ npm run dev
 
 ## 使用
 
-1. 优先上传 IPT，点击“导入完整零件”；系统通过 Inventor 转换、校验后直接显示三维预览并提供 STEP 下载，无需选择截面。
+1. 上传 IPT，点击“开始转换”；系统读取原有实体、转换、校验后直接显示三维预览并提供 STEP 下载，无需选择截面。原文件中有多个实体时，全部保存在同一个 STEP 文件中。
 2. 如只有二维源文件，可上传 DWG / DXF，点击“解析图纸”。
 3. 二维流程中检查布局、单位、图纸比例、文字/尺寸和未支持的对象，并使用整体识别方案或通用特征组合。
 4. SolidWorks 2023 中打开 STEP，按需另存为 SLDPRT。项目也提供手动运行的 COM 脚本：
@@ -51,7 +53,23 @@ powershell -File scripts/save-solidworks.ps1 -StepPath 'D:/models/model.step' -O
 
 此脚本需要本机已安装并授权的 SolidWorks，拒绝覆盖现有文件。它只保存导入的实体，不重建特征树；尚未在 SolidWorks 上实测。
 
+## STEP 工程图 PDF
+
+STEP 生成成功后，页面下方显示“STEP → 工程图 PDF”设置区。填写零件名称、图号、单位、材料和技术要求，选择 A3/A4、比例、模型长轴、旋转角度、横截面位置及纵剖偏移，点击“生成工程图 PDF”，即可预览和下载。
+
+- 从实际 STEP 生成主视图、端视图、纵向剖面和横截面；隐藏线可选。剖面线只填充实体材料区域，保留内孔。中心参考线按模型包围盒中心绘制，不代表设计基准。
+- 自动尺寸覆盖外形尺寸及可识别的完整横截面圆径，测量值来自实体几何。矢量曲线以最大 0.025 mm 模型空间偏差离散；PDF 不是三维预览截图。
+- 公差、粗糙度、材料、螺纹规格和热处理等设计要求不从几何猜测，需要填写。当前不自动生成完整加工尺寸链、形位公差框、局部放大图或装配明细表；不能视为原始五页参考图纸的自动恢复。
+- 固定比例无法放入图框、剖切平面没有材料或技术要求文字超出图框时返回明确错误，不会静默裁掉内容。更改设置后需重新生成，避免下载旧设置的图纸。
+- PDF 和设置 JSON 按独立版本保存在原模型任务目录内。接口：`POST /api/drawings/{job}/outputs/{generation}/engineering-pdf`；响应包含 `pdfUrl`，追加 `?download=true` 下载，否则在线预览。
+- 依赖已加入 `backend/requirements.txt`，现有环境升级后需重新安装该文件中的依赖并重启后端。中文优先嵌入系统宋体；没有宋体时使用标准中文 CID 字体。
+
 ## 样例结论与限制
+
+- IPT 使用 FreeCAD 0.21.2 和 InventorLoader 提交 `e94bdf5e29052a0dc7ce6fdf755e956ae507caec`，依赖只放在项目 `tools` 内。安装脚本校验下载归档 SHA-256；InventorLoader 源码及 GPL-2.0 许可证随归档保留，FreeCAD 和其他依赖保留各自许可证。
+- 已通过真实上传接口测试“下接头”（1 个实体、21 个面）、“中部连接头”（1 个实体、54 个面）、“下接头 -2”（2 个实体、42 个面），均输出一个 STEP 文件；检查面数、实体有效性及 STEP 回读体积。
+- 开源 IPT 支持范围有限；暂不支持多个候选实体数据集、一个实体包含多个边界壳及无法转换的面/边。检测到缺面、缺边、解析错误或非闭合实体时拒绝输出，不承诺支持任意 IPT。转换超时 240 秒，不保留原始参数化特征历史。
+- 可选真实样件回归：设置 `IPT_SAMPLE_DIR` 为上述三个 IPT 文件的目录，再执行 `npm run test:backend`。未设置时跳过真实样件测试，普通单元测试不能证明 IPT 转换成功。
 
 用户提供的“母扣零件.DWG”已实际解析：21 个图元、毫米单位、无文字或尺寸标注，是筒状带内螺纹零件的轴测投影。**不能仅凭所识别闭合区域准确还原该母扣。** 详见 `docs/sample-findings.md`。
 
@@ -64,6 +82,18 @@ powershell -File scripts/save-solidworks.ps1 -StepPath 'D:/models/model.step' -O
 - 大型图纸暂不支持：单布局最多 30,000 图元，最多返回 500 个候选区域；转换超时 90 秒。仅供可信本地图纸使用。
 
 ## 接口
+
+### IPT 输出选择（当前部分实现）
+
+上传 IPT 前可选择 STEP 或原始参数化 SLDPRT。STEP 保持现有转换和工程图 PDF 功能；SLDPRT 明确标为“尚不可用”，选择后不能提交。**此版本只完成格式选择和请求校验，未实现原始草图、尺寸约束及特征历史迁移，也没有生成可编辑的 SLDPRT。**
+
+`POST /api/drawings` 增加 multipart 字段 `outputFormat`，默认 `step` 兼容原调用。请求 `sldprt` 时返回 503 并说明未实现，不执行 STEP 转换、不创建任务或返回替代文件；非 IPT 请求该格式返回 422。`GET /api/health` 的 `iptParametric` 提供实际可用状态及原因。
+
+现有 InventorLoader 原生特征策略仍有未支持的约束，当前项目采用的是 ACIS 几何路径，且没有原生 SLDPRT 写入器。本机也未检测到 SolidWorks COM 注册接口。安装软件本身并不证明完整迁移已经可用；后续必须实现源参数读取、特征依赖映射、原生写入，并对样件逐项检查约束、历史及改尺寸后的重建结果。
+
+可进一步验证的原生路径：[SOLIDWORKS 2025 Inventor 文件导入说明](https://help.solidworks.com/2025/English/SolidWorks/sldworks/t_Autodesk_Inventor_Files.htm?format=P&value=)明确区分几何导入和特征导入，后者支持部分草图、草图尺寸及建模特征并保留历史，要求安装 Inventor；未识别特征会转为实体。该说明不是所有原始尺寸约束无损迁移的保证。需要在有授权且版本兼容的 SolidWorks / Inventor 转换环境中对三个样件验证；当前尚无该运行环境，未实现或验证自动化调用。
+
+[SOLIDWORKS LoadFile4 官方文档](https://help.solidworks.com/2025/English/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ISldWorks~LoadFile4.html)说明常用导入路径产生无特征历史的几何实体，因此不能把导入后另存或 FeatureWorks 几何识别当作原始历史迁移。此处不接入外部转换服务，不上传原文件。
 
 - `GET /api/health`：CAD 依赖状态。
 - `POST /api/drawings`：multipart `file` 上传；返回任务 ID、布局、几何和候选区域。
